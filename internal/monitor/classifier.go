@@ -1,98 +1,45 @@
 package monitor
 
-import "tailwatch/internal/events"
-import "tailwatch/internal/tailscale"
+import (
+	"net/netip"
+	"slices"
 
-type Config interface {
-    GetTrustedUsers() []string
-    GetTrustedDeviceIDs() []string
-    GetTrustedIPs() []string
+	"tailwatch/internal/config"
+	"tailwatch/internal/events"
+	"tailwatch/internal/tailscale"
+)
+
+var (
+	tailnetIPv4 = netip.MustParsePrefix("100.64.0.0/10")
+	tailnetIPv6 = netip.MustParsePrefix("fd7a:115c:a1e0::/48")
+)
+
+func Classify(cfg *config.Config, session events.Session, device *tailscale.Device) events.Decision {
+	ip := session.SourceIP.Unmap()
+	switch {
+	case !ip.IsValid():
+		return decision(events.Unknown, "Session was granted but the journal record contains no source IP")
+	case device != nil && device.LoginName != "" && device.LoginName != session.TailscaleUserIdentity:
+		return decision(events.Unknown, "Current device identity differs from the user in the session log")
+	case slices.Contains(cfg.TrustedIPs, ip):
+		return decision(events.Trusted, "Source IP is allowlisted")
+	case device != nil && slices.Contains(cfg.TrustedDeviceIDs, device.ID):
+		return decision(events.Trusted, "Device ID is allowlisted")
+	case device != nil && !device.Tagged && slices.Contains(cfg.TrustedUsers, device.LoginName):
+		return decision(events.Trusted, "Tailscale user is allowlisted")
+	case device != nil:
+		return decision(events.UnrecognizedTailnet, "Resolved device and user have no matching allowlist entry")
+	case tailnetIPv4.Contains(ip) || tailnetIPv6.Contains(ip):
+		return decision(events.Unknown, "Could not resolve the tailnet address to a device")
+	default:
+		return decision(events.External, "Unresolved source is outside the Tailscale address ranges")
+	}
 }
 
-type DeviceClassifier struct {
-    trustedUsers      []string
-    trustedDeviceIDs  []string
-    trustedIPs        []string
-}
-
-type ClassificationResult struct {
-    Classification events.TrustClassification
-    Severity       events.Severity
-    Reason         string
-}
-
-func NewDeviceClassifier(config Config) *DeviceClassifier {
-    return &DeviceClassifier{
-        trustedUsers:     config.GetTrustedUsers(),
-        trustedDeviceIDs: config.GetTrustedDeviceIDs(),
-        trustedIPs:       config.GetTrustedIPs(),
-    }
-}
-
-func (c *DeviceClassifier) Classify(sourceIP string, deviceInfo *tailscale.TailscaleDeviceInfo) ClassificationResult {
-    // First, check if source IP is in trusted IPs list
-    for _, trustedIP := range c.trustedIPs {
-        if trustedIP == sourceIP {
-            return ClassificationResult{
-                Classification: events.TrustClassificationTrusted,
-                Severity:       events.SeverityNormal,
-                Reason:         "Source IP is allowlisted",
-            }
-        }
-    }
-
-    // Check if Tailscale identity resolved
-    if deviceInfo != nil {
-        // Check device ID
-        for _, trustedID := range c.trustedDeviceIDs {
-            if trustedID == deviceInfo.ID {
-                return ClassificationResult{
-                    Classification: events.TrustClassificationTrusted,
-                    Severity:       events.SeverityNormal,
-                    Reason:         "Device ID is allowlisted",
-                }
-            }
-        }
-
-        // Check user email
-        for _, trustedUser := range c.trustedUsers {
-            if trustedUser == deviceInfo.UserEmail {
-                return ClassificationResult{
-                    Classification: events.TrustClassificationTrusted,
-                    Severity:       events.SeverityNormal,
-                    Reason:         "User email is allowlisted",
-                }
-            }
-        }
-
-        // Device/user is recognized but not allowlisted
-        return ClassificationResult{
-            Classification: events.TrustClassificationUnrecognizedTailnet,
-            Severity:       events.SeverityCritical,
-            Reason:         "Device/user recognized but not allowlisted",
-        }
-    }
-
-    // Check if IP is in Tailscale 100.64.0.0/10 range
-    if isTailscaleIP(sourceIP) {
-        // Tailscale IP but identity resolution failed
-        return ClassificationResult{
-            Classification: events.TrustClassificationUnknown,
-            Severity:       events.SeverityCritical,
-            Reason:         "Tailscale IP but identity resolution failed",
-        }
-    }
-
-    // External IP (not Tailscale)
-    return ClassificationResult{
-        Classification: events.TrustClassificationExternal,
-        Severity:       events.SeverityCritical,
-        Reason:         "Source is external (not Tailscale)",
-    }
-}
-
-func isTailscaleIP(ip string) bool {
-    // Check if IP is in Tailscale's unique IP range (100.64.0.0/10)
-    // This is the carrier-grade NAT range used by Tailscale
-    return len(ip) >= 7 && ip[:7] == "100.64."
+func decision(class events.TrustClassification, reason string) events.Decision {
+	severity := events.SeverityCritical
+	if class == events.Trusted {
+		severity = events.SeverityNormal
+	}
+	return events.Decision{TrustClassification: class, Severity: severity, Reason: reason}
 }
