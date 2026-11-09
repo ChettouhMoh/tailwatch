@@ -1,148 +1,151 @@
 package app
 
 import (
-    "context"
-    "fmt"
-    "log/slog"
-    "time"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/netip"
+	"slices"
+	"time"
+
+	"tailwatch/internal/config"
+	"tailwatch/internal/events"
+	"tailwatch/internal/monitor"
+	"tailwatch/internal/notifier"
+	"tailwatch/internal/source"
+	"tailwatch/internal/tailscale"
 )
 
-import "tailwatch/internal/events"
-import "tailwatch/internal/monitor"
-import "tailwatch/internal/notifier"
-import "tailwatch/internal/source"
-import "tailwatch/internal/tailscale"
-
 type App struct {
-    config          Config
-    eventSource     source.EventSource
-    identityResolver *tailscale.IdentityResolver
-    classifier      *monitor.DeviceClassifier
-    notifiers       []notifier.Notifier
-    logger          *slog.Logger
+	cfg     *config.Config
+	logger  *slog.Logger
+	resolve func(context.Context, netip.Addr) (*tailscale.Device, error)
+	notify  func(context.Context, events.Event) error
 }
 
-type Config interface {
-    GetTrustedUsers() []string
-    GetTrustedDeviceIDs() []string
-    GetTrustedIPs() []string
-    GetTailscaleBinary() string
-    GetTailscaleTimeout() int
-    GetNotificationProviders() []string
+func New(cfg *config.Config, logger *slog.Logger, output io.Writer, replay bool) *App {
+	resolver := tailscale.NewResolver(
+		cfg.Tailscale.Binary,
+		time.Duration(cfg.Tailscale.LookupTimeoutSeconds)*time.Second,
+		time.Duration(cfg.Monitor.IdentityCacheSeconds)*time.Second,
+	)
+	var webhook string
+	if !replay && cfg.Notification.Provider == "webhook" {
+		webhook = cfg.Notification.WebhookURL
+	}
+	return &App{cfg: cfg, logger: logger, resolve: resolver.Resolve, notify: notifier.New(output, webhook).Notify}
 }
 
-type RealConfig struct {
-    trustedUsers     []string
-    trustedDeviceIDs []string
-    trustedIPs       []string
-    tailscaleBinary  string
-    tailscaleTimeout int
-    notificationProviders []string
+func (a *App) event(ctx context.Context, session events.Session) (events.Event, error) {
+	var device *tailscale.Device
+	if session.SourceIP.IsValid() {
+		var err error
+		device, err = a.resolve(ctx, session.SourceIP)
+		if err != nil && ctx.Err() == nil {
+			a.logger.Warn("identity lookup failed", "session", session.ID, "ip", session.SourceIP.String(), "error", err)
+			device = nil
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		return events.Event{}, err
+	}
+	event := events.Event{Session: session, EventType: "SSH_SESSION_STARTED", Decision: monitor.Classify(a.cfg, session, device)}
+	if device != nil && (device.LoginName == "" || device.LoginName == session.TailscaleUserIdentity) {
+		event.DeviceHostname = device.Hostname
+		event.TailscaleDeviceID = device.ID
+	}
+	return event, nil
 }
 
-func NewRealConfig(appConfig interface{}) *RealConfig {
-    // Convert from internal config format
-    // This will be implemented with actual config loading
-    return &RealConfig{
-        trustedUsers:     []string{"test@example.com"},
-        trustedDeviceIDs: []string{},
-        trustedIPs:       []string{},
-        tailscaleBinary:  "/usr/bin/tailscale",
-        tailscaleTimeout: 3,
-        notificationProviders: []string{"stdout"},
-    }
+// finishPending advances the cursor only after all configured outputs acknowledge the event.
+func (a *App) finishPending(ctx context.Context, s *checkpoint, path string) error {
+	pending := s.Pending
+	if err := a.notify(ctx, pending.Event); err != nil {
+		return fmt.Errorf("deliver session %s: %w", pending.Event.ID, err)
+	}
+	s.Cursor = pending.Cursor
+	s.remember(pending.Event.ID)
+	s.Pending = nil
+	if path != "" {
+		return s.save(path)
+	}
+	return nil
 }
 
-func (c *RealConfig) GetTrustedUsers() []string { return c.trustedUsers }
-func (c *RealConfig) GetTrustedDeviceIDs() []string { return c.trustedDeviceIDs }
-func (c *RealConfig) GetTrustedIPs() []string { return c.trustedIPs }
-func (c *RealConfig) GetTailscaleBinary() string { return c.tailscaleBinary }
-func (c *RealConfig) GetTailscaleTimeout() int { return c.tailscaleTimeout }
-func (c *RealConfig) GetNotificationProviders() []string { return c.notificationProviders }
-
-func NewApp(appConfig interface{}, logger *slog.Logger) (*App, error) {
-    // For now, use test event source for development
-    // In production, this would use a real event source when available
-    eventSource := &source.TestEventSource{}
-    
-    config := NewRealConfig(appConfig)
-    
-    identityResolver := tailscale.NewIdentityResolver(
-        config.GetTailscaleBinary(),
-        config.GetTailscaleTimeout(),
-        60, // cache expiry
-    )
-    
-    classifier := monitor.NewDeviceClassifier(config)
-    
-    // Create notifiers
-    var notifiers []notifier.Notifier
-    // Note: In production, you'd set up real notifiers here
-    
-    return &App{
-        config:          config,
-        eventSource:     eventSource,
-        identityResolver: identityResolver,
-        classifier:      classifier,
-        notifiers:       notifiers,
-        logger:          logger,
-    }, nil
+type stream struct {
+	app       *App
+	state     *checkpoint
+	statePath string
+	lastSave  time.Time
+	delivered int
+	malformed int
 }
 
-func (a *App) Start(ctx context.Context) error {
-    // Start event source
-    if err := a.eventSource.Start(ctx); err != nil {
-        return fmt.Errorf("failed to start event source: %w", err)
-    }
-    
-    // Get events from test source
-    testEvents := a.eventSource.GetTestEvents()
-    
-    // Process each event
-    for _, testEvent := range testEvents {
-        if err := a.processEvent(ctx, testEvent); err != nil {
-            a.logger.Error("Error processing event", "error", err)
-        }
-    }
-    
-    return nil
+func (s *stream) handle(ctx context.Context, record source.Record) error {
+	if s.statePath != "" && record.Cursor == "" {
+		return errors.New("journal entry has no cursor")
+	}
+	session, err := record.Session()
+	if err != nil {
+		s.malformed++
+		s.app.logger.Warn("skipping malformed SSH start record", "error", err, "cursor", record.Cursor)
+	}
+	if session == nil || slices.Contains(s.state.Recent, session.ID) {
+		// Limit writes for ordinary daemon chatter. Re-reading these entries is harmless.
+		if s.statePath != "" && time.Since(s.lastSave) >= time.Minute {
+			s.lastSave = time.Now()
+			s.state.Cursor = record.Cursor
+			return s.state.save(s.statePath)
+		}
+		return nil
+	}
+	event, err := s.app.event(ctx, *session)
+	if err != nil {
+		return err
+	}
+	s.state.Pending = &pendingEvent{Cursor: record.Cursor, Event: event}
+	if s.statePath != "" {
+		if err := s.state.save(s.statePath); err != nil {
+			return fmt.Errorf("save undelivered event: %w", err)
+		}
+	}
+	if err := s.app.finishPending(ctx, s.state, s.statePath); err != nil {
+		return err
+	}
+	s.delivered++
+	s.lastSave = time.Now()
+	s.app.logger.Debug("processed SSH session", "session", event.ID, "classification", event.TrustClassification)
+	return nil
 }
 
-func (a *App) processEvent(ctx context.Context, testEvent source.TestEvent) error {
-    // Resolve Tailscale identity
-    deviceInfo, err := a.identityResolver.Resolve(testEvent.SourceIP)
-    if err != nil {
-        a.logger.Error("Identity resolution error", "error", err, "ip", testEvent.SourceIP)
-    }
-    
-    // Determine trust classification
-    classification := a.classifier.Classify(testEvent.SourceIP, deviceInfo)
-    
-    // Create event
-    event := events.NewEvent(
-        events.EventTypeSSHStarted,
-        testEvent.SourceIP,
-        testEvent.SSHUsername,
-    )
-    
-    event.DeviceHostname = testEvent.DeviceHostname
-    event.TailscaleDeviceID = deviceInfo.ID
-    event.TailscaleUserIdentity = deviceInfo.UserEmail
-    event.TrustClassification = classification.Classification
-    event.Severity = classification.Severity
-    
-    // Set authentication info if available
-    if deviceInfo != nil {
-        event.AuthenticationInfo = fmt.Sprintf("Tailscale user: %s, Device: %s", 
-            deviceInfo.UserEmail, deviceInfo.Hostname)
-    }
-    
-    // Notify via notifiers
-    for _, notifier := range a.notifiers {
-        if err := notifier.Notify(ctx, event); err != nil {
-            a.logger.Error("Notification error", "error", err)
-        }
-    }
-    
-    return nil
+func (a *App) Replay(ctx context.Context, reader io.Reader) error {
+	stream := stream{app: a, state: &checkpoint{}}
+	err := source.Read(ctx, reader, func(r source.Record) error { return stream.handle(ctx, r) })
+	a.logger.Info("journal replay finished", "sessions", stream.delivered, "malformed", stream.malformed)
+	return err
+}
+
+func (a *App) Follow(ctx context.Context, statePath string, stderr io.Writer) error {
+	if statePath == "" {
+		return errors.New("live monitoring requires a state file")
+	}
+	lock, err := lockJournal(statePath)
+	if err != nil {
+		return err
+	}
+	defer lock.Close()
+	state, err := loadCheckpoint(statePath)
+	if err != nil {
+		return fmt.Errorf("open journal state: %w", err)
+	}
+	if state.Pending != nil {
+		if err := a.finishPending(ctx, state, statePath); err != nil {
+			return err
+		}
+	}
+	a.logger.Info("following Tailscale SSH journal", "state", statePath, "resuming", state.Cursor != "")
+	stream := stream{app: a, state: state, statePath: statePath, lastSave: time.Now()}
+	return source.Follow(ctx, state.Since, state.Cursor, stderr, func(r source.Record) error { return stream.handle(ctx, r) })
 }
