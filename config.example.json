@@ -1,18 +1,11 @@
 {
   "tailscale": {
-    "binary": "/usr/bin/tailscale",
+    "binary": "tailscale",
     "lookup_timeout_seconds": 3
   },
-  "trusted_users": [
-    "admin@example.com",
-    "user@example.com"
-  ],
-  "trusted_device_ids": [
-    "device-abc123"
-  ],
-  "trusted_ips": [
-    "100.64.0.100"
-  ],
+  "trusted_users": [],
+  "trusted_device_ids": [],
+  "trusted_ips": [],
   "notification": {
     "provider": "stdout"
   },
