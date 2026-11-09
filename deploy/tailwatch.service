@@ -1,0 +1,22 @@
+[Unit]
+Description=Tailwatch Tailscale SSH monitor
+After=tailscaled.service systemd-journald.service
+Wants=tailscaled.service
+
+[Service]
+ExecStart=/usr/local/bin/tailwatch -config /etc/tailwatch/config.json -state /var/lib/tailwatch/journal.json
+DynamicUser=yes
+SupplementaryGroups=systemd-journal
+StateDirectory=tailwatch
+StateDirectoryMode=0700
+EnvironmentFile=-/etc/tailwatch/environment
+Restart=on-failure
+RestartSec=15s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
