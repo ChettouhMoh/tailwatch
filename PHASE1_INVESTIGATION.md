@@ -1,5 +1,7 @@
 # Tailwatch Phase 1: Event Collection Investigation
 
+> Historical design note. The current daemon consumes a Tailscale diagnostic session-start message from journald. See the README for verified formats and coverage.
+
 ## Executive Summary
 
 After comprehensive investigation of Tailscale SSH event collection capabilities, I must report a **critical limitation**: **No reliable local event source exists for Tailscale SSH sessions** in the current Tailscale ecosystem (as of version 1.48.0+).

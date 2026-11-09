@@ -1,5 +1,7 @@
 # Tailwatch - Phase 2: Core Implementation
 
+> Historical prototype notes. The README describes the current build, tests, live collector, and systemd service.
+
 ## Current Status
 
 **Major Achievement**: Successfully implemented core monitoring components despite Tailscale's lack of SSH event logging support.
