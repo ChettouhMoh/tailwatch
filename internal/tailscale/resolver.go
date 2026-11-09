@@ -1,91 +1,89 @@
 package tailscale
 
 import (
-    "bytes"
-    "encoding/json"
-    "os"
-    "os/exec"
-    "time"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/netip"
+	"os/exec"
+	"strings"
+	"time"
 )
 
-type TailscaleDeviceInfo struct {
-    ID        string   `json:"id"`
-    Hostname  string   `json:"hostname"`
-    UserEmail string   `json:"userEmail"`
-    Addresses []string `json:"addresses"`
+type Device struct {
+	ID        string
+	Hostname  string
+	LoginName string
+	Tagged    bool
 }
 
-type TailscaleStatus struct {
-    Peers []struct {
-        ID       string   `json:"id"`
-        Hostname string   `json:"hostname"`
-        User     string   `json:"user"`
-    } `json:"peers"`
+type cachedDevice struct {
+	device  Device
+	expires time.Time
 }
 
-type IdentityResolver struct {
-    binaryPath      string
-    timeoutSeconds  int
-    cache           map[string]*CachedInfo
-    cacheExpiry     time.Duration
+// Resolver is owned by the sequential event loop.
+type Resolver struct {
+	binary  string
+	timeout time.Duration
+	ttl     time.Duration
+	cache   map[netip.Addr]cachedDevice
 }
 
-type CachedInfo struct {
-    DeviceInfo *TailscaleDeviceInfo
-    Timestamp  time.Time
+func NewResolver(binary string, timeout, ttl time.Duration) *Resolver {
+	return &Resolver{binary: binary, timeout: timeout, ttl: ttl, cache: make(map[netip.Addr]cachedDevice)}
 }
 
-func NewIdentityResolver(binaryPath string, timeoutSeconds int, cacheExpirySeconds int) *IdentityResolver {
-    return &IdentityResolver{
-        binaryPath:     binaryPath,
-        timeoutSeconds: timeoutSeconds,
-        cache:          make(map[string]*CachedInfo),
-        cacheExpiry:    time.Duration(cacheExpirySeconds) * time.Second,
-    }
+func (r *Resolver) Resolve(ctx context.Context, ip netip.Addr) (*Device, error) {
+	if cached, ok := r.cache[ip]; ok && time.Now().Before(cached.expires) {
+		return &cached.device, nil
+	}
+	lookup, cancel := context.WithTimeout(ctx, r.timeout)
+	defer cancel()
+	cmd := exec.CommandContext(lookup, r.binary, "whois", "--json", ip.String())
+	cmd.WaitDelay = time.Second
+	data, err := cmd.Output()
+	if err != nil {
+		if lookup.Err() != nil {
+			return nil, lookup.Err()
+		}
+		return nil, fmt.Errorf("tailscale whois: %w", err)
+	}
+	device, err := parseWhois(data)
+	if err != nil {
+		return nil, err
+	}
+	if len(r.cache) >= 1024 {
+		clear(r.cache)
+	}
+	r.cache[ip] = cachedDevice{device: *device, expires: time.Now().Add(r.ttl)}
+	return device, nil
 }
 
-func (r *IdentityResolver) Resolve(sourceIP string) (*TailscaleDeviceInfo, error) {
-    // Check cache first
-    if cached, exists := r.cache[sourceIP]; exists {
-        if time.Since(cached.Timestamp) < r.cacheExpiry {
-            return cached.DeviceInfo, nil
-        }
-    }
-
-    // Use tailscale whois --json
-    cmd := exec.Command(r.binaryPath, "whois", "--json", sourceIP)
-
-    var out bytes.Buffer
-    cmd.Stdout = &out
-
-    if err := cmd.Run(); err != nil {
-        // If tailscale is not available or fails, return no identity
-        // This is a critical requirement: never crash the daemon
-        return nil, nil
-    }
-
-    // Try to parse the output
-    if out.Len() > 0 {
-        var deviceInfo TailscaleDeviceInfo
-        if err := json.Unmarshal(out.Bytes(), &deviceInfo); err != nil {
-            // If we can't parse, treat as unknown identity
-            return nil, nil
-        }
-
-        // Cache the result
-        r.cache[sourceIP] = &CachedInfo{
-            DeviceInfo: &deviceInfo,
-            Timestamp:  time.Now(),
-        }
-
-        return &deviceInfo, nil
-    }
-
-    return nil, nil
-}
-
-func (r *IdentityResolver) IsAvailable() bool {
-    // Check if tailscale binary exists
-    _, err := os.Stat(r.binaryPath)
-    return err == nil
+func parseWhois(data []byte) (*Device, error) {
+	var reply struct {
+		Node struct {
+			StableID string
+			Name     string
+			Tags     []string
+		}
+		UserProfile struct{ LoginName string }
+	}
+	if err := json.Unmarshal(data, &reply); err != nil {
+		return nil, fmt.Errorf("decode whois: %w", err)
+	}
+	if reply.Node.StableID == "" {
+		return nil, errors.New("whois returned no stable node ID")
+	}
+	tagged := len(reply.Node.Tags) > 0
+	if !tagged && reply.UserProfile.LoginName == "" {
+		return nil, errors.New("whois returned no user identity")
+	}
+	return &Device{
+		ID:        reply.Node.StableID,
+		Hostname:  strings.TrimSuffix(reply.Node.Name, "."),
+		LoginName: reply.UserProfile.LoginName,
+		Tagged:    tagged,
+	}, nil
 }
