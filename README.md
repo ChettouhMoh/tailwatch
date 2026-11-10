@@ -1,52 +1,80 @@
 # Tailwatch
 
-Tailwatch watches for authorized Tailscale SSH sessions on a Linux server. Each session produces a JSON event with the server, timestamp, Tailscale login, source IP, local SSH account, and the reason for its trust classification. An optional HTTPS webhook alerts on unfamiliar or unresolved devices.
+Tailwatch sends a notification for **every successful SSH login** it observes on a Linux VPS. It listens to Tailscale SSH and OpenSSH in the systemd journal. Every login goes to stdout as one JSON object. Select an HTTPS webhook, Telegram, or WhatsApp to receive the same login remotely.
+
+## What triggers an alert
+
+| Source | Evidence of success | Information available |
+| --- | --- | --- |
+| Tailscale SSH | A recognized post-authentication session start or grant from `tailscaled`. Adjacent records with the same session ID produce one event. | Server, time, local account and the Tailscale login from the journal. A detailed start also supplies the source IP. A successful lookup can add the device name and stable ID. |
+| OpenSSH with a recognized Tailscale peer | The SSH daemon logs `Accepted` after successful authentication. | Server, time, local account, method and peer IP. A successful `tailscale whois` lookup can add the device and the associated owner. The owner describes the peer and the SSH account describes the login. |
+| OpenSSH from a public, LAN or unresolved address | The same OpenSSH authentication event. | Server, time, account, method and the source IP seen by the VPS. A proxy, bastion or subnet router may be the immediate peer. Tailwatch leaves the original device and route unspecified. |
+
+Logins that match an allowlist still generate a notification. Failed attempts, incomplete MFA steps, duplicate PAM session-open messages, and ordinary network connections do not. With multiplexed OpenSSH connections, authentication happens once and later channels reuse it. Tailscale SSH emits events per authorized session channel. Provider web consoles, serial consoles and local logins are outside this SSH collector.
+
+The live reader accepts Tailscale messages from `tailscaled.service` and root-owned journal records from `sshd`, `sshd-session` and `sshd-auth`, including socket-activated units. The host must retain those messages in journald. A syslog-only host needs to make its SSH logs available in the journal. Tailscale's native SSH messages are diagnostic and can change with upgrades. [Tailscale logging](https://tailscale.com/docs/features/logging?tab=linux) · [Tailscale SSH source](https://github.com/tailscale/tailscale/blob/main/ssh/tailssh/tailssh.go) · [OpenSSH authentication source](https://github.com/openssh/openssh-portable/blob/master/auth.c)
 
 ## Try it locally
 
-Go 1.21 or newer is required to build. The sample journal works on Linux, macOS, and Windows.
+Go 1.21 or newer is required to build. The replay fixture runs on Linux, macOS and Windows.
 
 ```sh
 go test ./...
 go run ./cmd/tailwatch -config config.example.json -replay testdata/journal.jsonl
 ```
 
-With a prebuilt Linux binary, run `./tailwatch -config config.example.json -replay testdata/journal.jsonl`. The sample has two session starts and an adjacent access-granted message. Expect two JSON events on stdout. Diagnostics and a session count go to stderr. Replay queries the local Tailscale CLI for the IPs in the file. A machine without those peers will report `UNKNOWN`. Replay skips webhooks and leaves the live journal checkpoint untouched.
+With an extracted Linux binary, use `./tailwatch -config config.example.json -replay testdata/journal.jsonl`. Expect **four events** from the mixed fixture. Replay prints events locally, skips remote senders and leaves the live checkpoint untouched. Diagnostics go to stderr. The JSON includes `ssh_server`, a readable `message`, and optional `auth_method` or peer identity fields. Existing consumers can still use `event_type: SSH_SESSION_STARTED` and `id`. An OpenSSH event ID is derived from its journal cursor.
 
-## Configure trust
+## Choose a notification channel
 
-Copy `config.example.json` to `config.json`. The example starts with empty allowlists. Choose the rule that reflects what you trust.
+Copy `config.example.json` to `config.json`. Replace its `notification` object with one of the examples below. Stdout remains available with every provider. Restart the service after changing the configuration or environment. The sample configuration uses stdout alone.
 
-| Rule | Effect |
-| --- | --- |
-| `trusted_device_ids` | Trusts a specific Tailscale node. Use this alone to alert when a familiar user connects from a new device. Use `Node.StableID` from `tailscale whois --json <peer-ip>`. |
-| `trusted_users` | Trusts every user-owned device whose resolved login matches an entry. Tagged devices can qualify through the device or IP lists. |
-| `trusted_ips` | Trusts an exact IPv4 or IPv6 address, including when a lookup fails. Revisit entries if addresses are reassigned. |
+**Generic HTTPS webhook**
 
-Any one rule can match. Usernames and stable IDs use exact matches. A conflict between the observed login and the current lookup takes precedence over all allowlists and produces `UNKNOWN`. A successful lookup is cached for `monitor.identity_cache_seconds` (default 60). The lookup timeout defaults to 3 seconds. A lookup during replay or backlog processing reflects the device known at processing time.
+```json
+{"provider":"webhook"}
+```
 
-| Classification | Meaning |
-| --- | --- |
-| `TRUSTED` | An allowlist rule matched. Severity is `NORMAL`. |
-| `UNRECOGNIZED_TAILNET` | The device resolved, and no allowlist rule matched. Severity is `CRITICAL`. |
-| `UNKNOWN` | The tailnet address could not be resolved, the observed and resolved identities conflict, or the session grant has no source IP. Severity is `CRITICAL`. |
-| `EXTERNAL` | The unresolved source is outside those ranges. Severity is `CRITICAL`. |
+Set `TAILWATCH_WEBHOOK_URL` to the receiver URL, or set `notification.webhook_url` in the file. The environment variable takes precedence. The receiver gets the full JSON event and must return HTTP 2xx. Use the `Idempotency-Key` request header, also present in the body as `id`, to deduplicate retries. Upgrading from the original webhook behavior enables delivery for trusted logins too.
 
-### Webhook alerts
+**Telegram**
 
-Set `notification.provider` to `webhook`. Supply the endpoint through `TAILWATCH_WEBHOOK_URL` or `notification.webhook_url`. The environment variable takes precedence. Use a generic HTTPS receiver that accepts the event as JSON and returns a 2xx response. Tailwatch sends every event to stdout and posts only critical events to the receiver. It uses a 10-second HTTP timeout and rejects redirects.
+```json
+{"provider":"telegram","telegram":{"chat_id":"-1001234567890"}}
+```
 
-The receiver should deduplicate by the `Idempotency-Key` header, which is the session ID in the JSON body. Delivery is at least once. A crash after receipt and before checkpointing can repeat a POST or stdout line.
+Set `TAILWATCH_TELEGRAM_BOT_TOKEN` to your bot token. Start a private chat with the bot, or give it posting access to the destination group or channel. Use the actual chat ID or channel username. Tailwatch sends a plain-text login summary using `sendMessage`. [Telegram Bot API](https://core.telegram.org/bots/api#sendmessage)
+
+**WhatsApp Business Cloud API**
+
+```json
+{
+  "provider":"whatsapp",
+  "whatsapp":{
+    "api_version":"v23.0",
+    "phone_number_id":"1234567890",
+    "recipient":"15550100000",
+    "template":"vps_login",
+    "language":"en_US"
+  }
+}
+```
+
+Use the Graph API version enabled for your integration, the sender's **phone number ID**, and the recipient's phone number with country code, digits only. Set `TAILWATCH_WHATSAPP_ACCESS_TOKEN` to a token with messaging access. Configure an approved text template in the indicated language with **one positional body parameter** and no required header or button parameters. For example, the template body might read “SSH login alert — {{1}}. Check your server log for details.” Tailwatch fills that parameter with the login summary. A successful API response with a message ID confirms submission to Meta. [Meta's template message example](https://www.postman.com/meta/whatsapp-business-platform/request/o65u5m5/send-message-template-text)
+
+All remote requests use a 10-second timeout. Failed sends leave the original event pending. After a restart Tailwatch retries it before reading later events. A crash after the receiver accepts a message can produce a duplicate, including in Telegram or WhatsApp. Journal retention limits catch-up after an extended outage.
+
+## Identity and trust
+
+For OpenSSH, Tailwatch attempts a lookup only for addresses in Tailscale's IPv4 or IPv6 ranges. An address in those ranges by itself does not establish a peer identity. Tagged devices can have a device name and ID without a human owner. Missing identity still produces an alert. Lookups during replay or backlog processing reflect the mapping at lookup time. The default timeout is 3 seconds and successful lookups are cached for 60 seconds. [Tailscale CLI](https://tailscale.com/docs/reference/tailscale-cli#whois)
+
+Configure `trusted_device_ids` for individual devices, `trusted_users` for every user-owned device belonging to an exact login, or `trusted_ips` for exact addresses, including when lookup fails. Any matching rule yields `TRUSTED` unless a native Tailscale session's recorded login conflicts with the current lookup. Other classifications are `UNRECOGNIZED_TAILNET`, `UNKNOWN`, and `EXTERNAL`. Here `EXTERNAL` means an unresolved source outside Tailscale's address ranges and can include a LAN address. Classification annotates the event. Every classification is delivered.
 
 ## Run on a Linux VPS
 
-The live source requires a systemd host with `journalctl` supporting `--output-fields`, Tailscale SSH enabled, and permission to read the `tailscaled.service` journal. Install the Tailscale CLI on the server for identity lookup. When building from source, produce the binary on the VPS.
+The live source needs a systemd host with `journalctl` supporting `--output-fields` and access to the system journal. OpenSSH monitoring can run without Tailscale installed. Install the Tailscale CLI for peer enrichment and enable Tailscale SSH on hosts where you want to observe native sessions.
 
-```sh
-go build -o tailwatch ./cmd/tailwatch
-```
-
-Run the following commands from the repository or the extracted Linux binary archive.
+When building from source, run `go build -o tailwatch ./cmd/tailwatch`. From the repository or extracted Linux archive:
 
 ```sh
 sudo install -m 0755 tailwatch /usr/local/bin/tailwatch
@@ -57,25 +85,22 @@ fi
 sudoedit /etc/tailwatch/config.json
 sudo install -m 0644 deploy/tailwatch.service /etc/systemd/system/tailwatch.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now tailwatch
+sudo systemctl enable tailwatch
+sudo systemctl restart tailwatch
 sudo journalctl -u tailwatch -f -o cat
 ```
 
-The service runs as an unprivileged dynamic user with journal access. Its checkpoint and pending event live in `/var/lib/tailwatch/journal.json`. For webhook credentials, create a root-owned, mode-0600 `/etc/tailwatch/environment` containing `TAILWATCH_WEBHOOK_URL=https://...`. Restart Tailwatch after changing its configuration.
+For a remote channel, put the required environment variable in a root-owned, mode-0600 `/etc/tailwatch/environment` before restarting. The unit runs under an unprivileged account with journal access. It stores the pending event, cursor and last 256 delivered IDs in `/var/lib/tailwatch/journal.json`. Existing checkpoints carry forward. A foreground run can use `./tailwatch -config config.json -state ./tailwatch-state.json` from a writable directory. A first run starts at the current second.
 
-For a foreground run, use `./tailwatch -config config.json -state ./tailwatch-state.json` from a writable directory. The first run starts at the current second. On restart, Tailwatch finishes any pending delivery and resumes after the saved journal cursor. It remembers the last 256 delivered session IDs. A failed output stops processing with an error. The systemd unit retries after 15 seconds. Later sessions wait in the journal while delivery is unavailable, so journal retention limits how long an outage can be recovered.
+## Verify detection
 
-## Verify detection on your server
+Open a fresh SSH connection through each entry point enabled on your VPS. For OpenSSH, avoid reusing a multiplexed connection during this check. Confirm that the Linux account and server in the notification match the login. Connect once with an allowlisted device too and verify it still sends. After Tailscale upgrades, repeat the native SSH check to confirm its journal format.
 
-1. Open a **Tailscale SSH** shell on the VPS from a device whose stable ID you allowlisted. Check Tailwatch's journal for a `TRUSTED` event with the expected server and local account.
-2. Connect from a second authorized device with no matching allowlist entry. Check for `UNRECOGNIZED_TAILNET` and a single critical alert at the receiver. Compare the session ID in the alert and server log.
-3. If the event is missing, export the daemon journal covering the login and replay it. Check the session and malformed counts on stderr.
+To inspect the last ten minutes using the same source filters as the daemon:
 
 ```sh
-sudo journalctl -u tailscaled --since '10 minutes ago' -o json > login.jsonl
-./tailwatch -config /etc/tailwatch/config.json -replay login.jsonl
+sudo journalctl --since '10 minutes ago' -o json \
+  _SYSTEMD_UNIT=tailscaled.service _COMM=tailscaled + \
+  _UID=0 _COMM=sshd _COMM=sshd-session _COMM=sshd-auth > login.jsonl
+./tailwatch -config config.example.json -replay login.jsonl
 ```
-
-Tailscale's SSH server logs a post-authentication message containing the session ID, login, source IP, and local account. Tailwatch also recognizes the adjacent grant message and deduplicates by session ID. If only the grant is available, the event carries an empty `source_ip` and an `UNKNOWN` classification. The diagnostic format can change across versions. Tailscale documents local SSH session logs as unsupported, so verify detection after Tailscale upgrades. [Tailscale SSH implementation](https://github.com/tailscale/tailscale/blob/v1.88.4/ssh/tailssh/tailssh.go#L586-L610) · [Tailscale logging documentation](https://tailscale.com/docs/features/logging?tab=linux)
-
-Coverage is limited to authorized session starts observed by Tailscale SSH. Ordinary OpenSSH logins, denied connections, session endings, and terminal activity are outside this collector's scope. Access enforcement stays with the server's Tailscale SSH policy.
