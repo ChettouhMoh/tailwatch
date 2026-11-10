@@ -28,6 +28,9 @@ func TestLoadRejectsInvalidConfig(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	for _, data := range []string{"null", "{} {}", `{"trusted_user":["typo"]}`, `{"trusted_ips":["100.100.1.999"]}`, `{"trusted_device_ids":[""]}`,
 		`{"notification":{"provider":"chat"}}`, `{"notification":{"provider":"webhook","webhook_url":"http://host/secret"}}`,
+		`{"notification":{"provider":"telegram","telegram":{}}}`,
+		`{"notification":{"provider":"whatsapp","whatsapp":{"phone_number_id":"123","recipient":"../fake"}}}`,
+		`{"notification":{"provider":"whatsapp","whatsapp":{"phone_number_id":"123","recipient":"123","api_version":"x/123","template":"login","language":"en_US"}}}`,
 		`{"tailscale":{"lookup_timeout_seconds":-3}}`, `{"monitor":{"identity_cache_seconds":9223372036854775807}}`} {
 		if err := os.WriteFile(path, []byte(data), 0600); err != nil {
 			t.Fatal(err)

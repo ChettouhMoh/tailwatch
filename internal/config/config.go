@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -20,7 +21,24 @@ type TailscaleConfig struct {
 type NotificationConfig struct {
 	Provider   string `json:"provider"`
 	WebhookURL string `json:"webhook_url"`
+	Telegram   struct {
+		ChatID string `json:"chat_id"`
+	} `json:"telegram"`
+	WhatsApp WhatsAppConfig `json:"whatsapp"`
 }
+
+type WhatsAppConfig struct {
+	PhoneNumberID string `json:"phone_number_id"`
+	Recipient     string `json:"recipient"`
+	Template      string `json:"template"`
+	Language      string `json:"language"`
+	APIVersion    string `json:"api_version"`
+}
+
+var (
+	digits       = regexp.MustCompile(`^[0-9]+$`)
+	graphVersion = regexp.MustCompile(`^v[0-9]+\.[0-9]+$`)
+)
 
 type MonitorConfig struct {
 	IdentityCacheSeconds int64 `json:"identity_cache_seconds"`
@@ -96,6 +114,18 @@ func (c *Config) Validate() error {
 		u, err := url.Parse(c.Notification.WebhookURL)
 		if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.Fragment != "" {
 			return errors.New("webhook provider requires an HTTPS URL without embedded credentials or a fragment")
+		}
+	case "telegram":
+		if strings.TrimSpace(c.Notification.Telegram.ChatID) == "" {
+			return errors.New("telegram requires notification.telegram.chat_id")
+		}
+	case "whatsapp":
+		w := c.Notification.WhatsApp
+		if !digits.MatchString(w.PhoneNumberID) || !digits.MatchString(w.Recipient) {
+			return errors.New("whatsapp requires numeric phone_number_id and recipient including country code")
+		}
+		if !graphVersion.MatchString(w.APIVersion) || strings.TrimSpace(w.Template) == "" || strings.TrimSpace(w.Language) == "" {
+			return errors.New("whatsapp requires api_version (vN.N), template and language")
 		}
 	default:
 		return fmt.Errorf("unknown notification provider %q", c.Notification.Provider)

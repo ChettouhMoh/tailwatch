@@ -43,3 +43,19 @@ func TestCLIReplay(t *testing.T) {
 		t.Fatalf("replay wrote live state: %v", err)
 	}
 }
+
+func TestReplayWithoutChatCredentials(t *testing.T) {
+	t.Setenv("TAILWATCH_TELEGRAM_BOT_TOKEN", "")
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := `{"tailscale":{"binary":"missing-tailscale"},"notification":{"provider":"telegram","telegram":{"chat_id":"123"}}}`
+	if err := os.WriteFile(path, []byte(cfg), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := run(context.Background(), []string{"-config", path, "-replay", "../../testdata/journal.jsonl"}, &output, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Count(output.Bytes(), []byte("\n")) != 4 {
+		t.Fatal("missing replay events")
+	}
+}
