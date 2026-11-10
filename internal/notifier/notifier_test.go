@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,7 +12,7 @@ import (
 	"tailwatch/internal/events"
 )
 
-func TestWebhookSendsOnlyCriticalEvents(t *testing.T) {
+func TestWebhookSendsAllSuccessfulLogins(t *testing.T) {
 	received := make(chan events.Event, 2)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var event events.Event
@@ -28,18 +27,19 @@ func TestWebhookSendsOnlyCriticalEvents(t *testing.T) {
 	}))
 	defer server.Close()
 	var stdout bytes.Buffer
-	n := New(&stdout, server.URL)
-	n.client.Transport = server.Client().Transport
+	w := webhook{url: server.URL, client: newHTTPClient()}
+	w.client.Transport = server.Client().Transport
+	n := NewOutput(&stdout, w)
 	e := events.Event{Session: events.Session{ID: "sess-1"}, Decision: events.Decision{Severity: events.SeverityNormal}}
-	if err := n.Notify(context.Background(), e); err != nil {
+	if err := n.Send(context.Background(), e); err != nil {
 		t.Fatal(err)
 	}
 	e.ID = "sess-2"
 	e.Severity = events.SeverityCritical
-	if err := n.Notify(context.Background(), e); err != nil {
+	if err := n.Send(context.Background(), e); err != nil {
 		t.Fatal(err)
 	}
-	if len(received) != 1 || (<-received).ID != "sess-2" || strings.Count(stdout.String(), "\n") != 2 {
+	if len(received) != 2 || (<-received).ID != "sess-1" || (<-received).ID != "sess-2" || strings.Count(stdout.String(), "\n") != 2 {
 		t.Fatalf("wrong delivery count; stdout=%s", stdout.String())
 	}
 }
@@ -53,15 +53,15 @@ func TestWebhookFailureAndRedirect(t *testing.T) {
 			w.Header().Set("Location", "/elsewhere")
 			w.WriteHeader(status)
 		}))
-		n := New(io.Discard, server.URL+"/private-token")
+		n := webhook{url: server.URL + "/private-token", client: newHTTPClient()}
 		n.client.Transport = server.Client().Transport
 		event := events.Event{Decision: events.Decision{Severity: events.SeverityCritical}}
-		err := n.Notify(context.Background(), event)
+		err := n.Send(context.Background(), event)
 		server.Close()
 		if err == nil || strings.Contains(err.Error(), "private-token") {
 			t.Fatalf("unexpected delivery error: %v", err)
 		}
-		err = n.Notify(context.Background(), event)
+		err = n.Send(context.Background(), event)
 		if err == nil || strings.Contains(err.Error(), "private-token") {
 			t.Fatalf("endpoint leaked or missing error: %v", err)
 		}

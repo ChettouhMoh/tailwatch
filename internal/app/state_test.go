@@ -26,7 +26,7 @@ func TestFailedDeliverySurvivesRestart(t *testing.T) {
 	msg, _ := json.Marshal(`ssh-session(sess-original): handling new SSH connection from admin (100.100.1.2) to ssh-user "ops"`)
 	record := source.Record{Unit: "tailscaled.service", Command: "tailscaled", Host: "server", Cursor: "c1", Micros: "1768468800000000", Message: msg}
 	ctx := context.Background()
-	a := New(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)), io.Discard, false)
+	a := New(&config.Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 	lookups := 0
 	a.resolve = func(context.Context, netip.Addr) (*tailscale.Device, error) {
 		lookups++
@@ -82,7 +82,7 @@ func TestCorruptCheckpointDoesNotResetCursor(t *testing.T) {
 
 func TestStandaloneGrantProducesUnknownAlert(t *testing.T) {
 	cfg := &config.Config{TrustedUsers: []string{"admin"}}
-	a := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), io.Discard, true)
+	a := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 	a.resolve = func(context.Context, netip.Addr) (*tailscale.Device, error) {
 		t.Fatal("grant without IP triggered identity lookup")
 		return nil, nil
@@ -104,7 +104,7 @@ func TestStandaloneGrantProducesUnknownAlert(t *testing.T) {
 
 func TestOpenSSHPeerEnrichment(t *testing.T) {
 	cfg := &config.Config{TrustedUsers: []string{"alice@example.com"}}
-	a := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), io.Discard, true)
+	a := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 	calls := 0
 	a.resolve = func(context.Context, netip.Addr) (*tailscale.Device, error) {
 		calls++

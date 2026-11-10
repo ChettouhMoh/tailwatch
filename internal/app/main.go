@@ -13,7 +13,6 @@ import (
 	"tailwatch/internal/config"
 	"tailwatch/internal/events"
 	"tailwatch/internal/monitor"
-	"tailwatch/internal/notifier"
 	"tailwatch/internal/source"
 	"tailwatch/internal/tailscale"
 )
@@ -25,17 +24,13 @@ type App struct {
 	notify  func(context.Context, events.Event) error
 }
 
-func New(cfg *config.Config, logger *slog.Logger, output io.Writer, replay bool) *App {
+func New(cfg *config.Config, logger *slog.Logger, send func(context.Context, events.Event) error) *App {
 	resolver := tailscale.NewResolver(
 		cfg.Tailscale.Binary,
 		time.Duration(cfg.Tailscale.LookupTimeoutSeconds)*time.Second,
 		time.Duration(cfg.Monitor.IdentityCacheSeconds)*time.Second,
 	)
-	var webhook string
-	if !replay && cfg.Notification.Provider == "webhook" {
-		webhook = cfg.Notification.WebhookURL
-	}
-	return &App{cfg: cfg, logger: logger, resolve: resolver.Resolve, notify: notifier.New(output, webhook).Notify}
+	return &App{cfg: cfg, logger: logger, resolve: resolver.Resolve, notify: send}
 }
 
 func (a *App) event(ctx context.Context, session events.Session) (events.Event, error) {

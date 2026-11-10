@@ -1,65 +1,47 @@
 package notifier
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"net/url"
-	"time"
 
+	"tailwatch/internal/config"
 	"tailwatch/internal/events"
 )
 
-type Notifier struct {
-	output     *json.Encoder
-	webhookURL string
-	client     *http.Client
+// Sender acknowledges an event when the channel has accepted it. Returning an
+// error leaves the original event pending for retry.
+type Sender interface {
+	Send(context.Context, events.Event) error
 }
 
-func New(output io.Writer, webhookURL string) *Notifier {
-	return &Notifier{
-		output:     json.NewEncoder(output),
-		webhookURL: webhookURL,
-		client: &http.Client{
-			Timeout:       10 * time.Second,
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		},
-	}
+type Output struct {
+	local  *json.Encoder
+	remote Sender
 }
 
-func (n *Notifier) Notify(ctx context.Context, event events.Event) error {
-	if err := n.output.Encode(event); err != nil {
-		return fmt.Errorf("write event: %w", err)
+func NewOutput(w io.Writer, remote Sender) *Output {
+	return &Output{local: json.NewEncoder(w), remote: remote}
+}
+
+func (o *Output) Send(ctx context.Context, event events.Event) error {
+	if err := o.local.Encode(envelope(event)); err != nil {
+		return fmt.Errorf("write login event: %w", err)
 	}
-	if n.webhookURL == "" || event.Severity != events.SeverityCritical {
+	if o.remote == nil {
 		return nil
 	}
-	body, err := json.Marshal(event)
-	if err != nil {
-		return err
+	return o.remote.Send(ctx, event)
+}
+
+func Remote(cfg config.NotificationConfig) (Sender, error) {
+	switch cfg.Provider {
+	case "", "stdout":
+		return nil, nil
+	case "webhook":
+		return webhook{url: cfg.WebhookURL, client: newHTTPClient()}, nil
+	default:
+		return nil, fmt.Errorf("unknown notification provider %q", cfg.Provider)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.webhookURL, bytes.NewReader(body))
-	if err != nil {
-		return errors.New("invalid webhook request")
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Idempotency-Key", event.ID)
-	res, err := n.client.Do(req)
-	if err != nil {
-		// url.Error includes the endpoint, which can contain a secret in its path or query.
-		var endpointError *url.Error
-		if errors.As(err, &endpointError) {
-			err = endpointError.Err
-		}
-		return fmt.Errorf("webhook POST failed: %w", err)
-	}
-	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return fmt.Errorf("webhook returned HTTP %d", res.StatusCode)
-	}
-	return nil
 }

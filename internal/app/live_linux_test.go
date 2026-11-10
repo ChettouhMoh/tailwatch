@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"tailwatch/internal/config"
+	"tailwatch/internal/notifier"
 )
 
 func TestLiveJournalResumeAndLock(t *testing.T) {
@@ -42,7 +43,7 @@ func TestLiveJournalResumeAndLock(t *testing.T) {
 	}
 	var output bytes.Buffer
 	cfg := &config.Config{Tailscale: config.TailscaleConfig{Binary: "/nonexistent-tailscale", LookupTimeoutSeconds: 1}}
-	a := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), &output, false)
+	a := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), notifier.NewOutput(&output, nil).Send)
 	var journalErrors bytes.Buffer
 	err = a.Follow(context.Background(), statePath, &journalErrors)
 	if err == nil || !strings.Contains(err.Error(), "stopped following") {

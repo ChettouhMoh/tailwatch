@@ -13,6 +13,7 @@ import (
 
 	"tailwatch/internal/app"
 	"tailwatch/internal/config"
+	"tailwatch/internal/notifier"
 )
 
 func main() {
@@ -46,7 +47,14 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		level = slog.LevelDebug
 	}
 	logger := slog.New(slog.NewJSONHandler(stderr, &slog.HandlerOptions{Level: level}))
-	daemon := app.New(cfg, logger, stdout, *replay != "")
+	var remote notifier.Sender
+	if *replay == "" {
+		remote, err = notifier.Remote(cfg.Notification)
+		if err != nil {
+			return err
+		}
+	}
+	daemon := app.New(cfg, logger, notifier.NewOutput(stdout, remote).Send)
 	if *replay == "" {
 		return daemon.Follow(ctx, *state, stderr)
 	}
