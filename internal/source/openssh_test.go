@@ -39,3 +39,20 @@ func TestOpenSSHSuccessRecords(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenSSHGrantWithoutIPInBinaryJournalField(t *testing.T) {
+	message := "Accepted publickey for ops from UNKNOWN port 65535 ssh2"
+	octets := make([]int, len(message))
+	for i := range octets {
+		octets[i] = int(message[i])
+	}
+	raw, err := json.Marshal(octets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := Record{Command: "sshd", UID: "0", Host: "vps", Micros: "1768468805000000", Message: raw}
+	session, err := record.Session()
+	if err != nil || session == nil || session.SSHUsername != "ops" || session.AuthMethod != "publickey" || session.SourceIP.IsValid() {
+		t.Fatalf("lost confirmed authentication: session=%+v err=%v", session, err)
+	}
+}

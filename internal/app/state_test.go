@@ -80,6 +80,21 @@ func TestCorruptCheckpointDoesNotResetCursor(t *testing.T) {
 	}
 }
 
+func TestPendingLoginFromPreviousVersion(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state")
+	old := `{"since":1,"pending":{"cursor":"c1","event":{"id":"sess-old","event_type":"SSH_SESSION_STARTED","severity":"NORMAL","ssh_username":"ops"}}}`
+	if err := os.WriteFile(path, []byte(old), 0600); err != nil {
+		t.Fatal(err)
+	}
+	state, err := loadCheckpoint(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Pending.Event.SSHServer != events.TailscaleSSH || state.Pending.Event.ID != "sess-old" {
+		t.Fatalf("unexpected pending login: %+v", state.Pending)
+	}
+}
+
 func TestStandaloneGrantProducesUnknownAlert(t *testing.T) {
 	cfg := &config.Config{TrustedUsers: []string{"admin"}}
 	a := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)

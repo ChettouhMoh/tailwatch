@@ -24,9 +24,14 @@ func (r Record) openSSHSession(msg string) (*events.Session, error) {
 	if fields == nil {
 		return nil, errors.New("unrecognized OpenSSH authentication record")
 	}
-	ip, err := netip.ParseAddr(fields[3])
-	if err != nil {
-		return nil, errors.New("invalid peer address in OpenSSH login")
+	var ip netip.Addr
+	// OpenSSH reports UNKNOWN and port 65535 for a non-IP connection.
+	if fields[3] != "UNKNOWN" {
+		addr, err := netip.ParseAddr(fields[3])
+		if err != nil {
+			return nil, errors.New("invalid peer address in OpenSSH login")
+		}
+		ip = addr.Unmap()
 	}
 	if _, err := strconv.ParseUint(fields[4], 10, 16); err != nil {
 		return nil, errors.New("invalid peer port in OpenSSH login")
@@ -41,7 +46,7 @@ func (r Record) openSSHSession(msg string) (*events.Session, error) {
 		ID:          fmt.Sprintf("openssh-%x", sha256.Sum256([]byte(key))),
 		SSHServer:   events.OpenSSH,
 		SSHUsername: fields[2],
-		SourceIP:    ip.Unmap(),
+		SourceIP:    ip,
 		AuthMethod:  fields[1],
 	}, nil
 }

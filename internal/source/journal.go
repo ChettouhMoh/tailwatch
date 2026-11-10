@@ -36,11 +36,23 @@ var (
 
 func (r Record) Session() (*events.Session, error) {
 	var msg string
-	if len(r.Message) == 0 || r.Message[0] != '"' {
+	if len(r.Message) == 0 {
 		return nil, nil
 	}
-	if err := json.Unmarshal(r.Message, &msg); err != nil {
-		return nil, err
+	switch r.Message[0] {
+	case '"':
+		if err := json.Unmarshal(r.Message, &msg); err != nil {
+			return nil, err
+		}
+	case '[':
+		// journalctl uses byte arrays for non-printable field values.
+		var data []byte
+		if err := json.Unmarshal(r.Message, &data); err != nil {
+			return nil, nil
+		}
+		msg = string(data)
+	default:
+		return nil, nil
 	}
 	var session *events.Session
 	var err error
