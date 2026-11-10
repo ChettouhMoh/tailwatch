@@ -1,7 +1,6 @@
 [Unit]
-Description=Tailwatch Tailscale SSH monitor
-After=tailscaled.service systemd-journald.service
-Wants=tailscaled.service
+Description=Tailwatch SSH login monitor
+After=systemd-journald.service
 
 [Service]
 ExecStart=/usr/local/bin/tailwatch -config /etc/tailwatch/config.json -state /var/lib/tailwatch/journal.json

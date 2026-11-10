@@ -101,3 +101,25 @@ func TestStandaloneGrantProducesUnknownAlert(t *testing.T) {
 		t.Fatalf("unexpected fallback events: %+v", sent)
 	}
 }
+
+func TestOpenSSHPeerEnrichment(t *testing.T) {
+	cfg := &config.Config{TrustedUsers: []string{"alice@example.com"}}
+	a := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), io.Discard, true)
+	calls := 0
+	a.resolve = func(context.Context, netip.Addr) (*tailscale.Device, error) {
+		calls++
+		return &tailscale.Device{ID: "n-1", Hostname: "laptop", LoginName: "alice@example.com"}, nil
+	}
+	session := events.Session{SSHServer: events.OpenSSH, SSHUsername: "root", SourceIP: netip.MustParseAddr("100.100.1.2")}
+	peer, err := a.event(context.Background(), session)
+	if err != nil || peer.PeerLogin != "alice@example.com" || peer.SSHUsername != "root" || peer.TailscaleUserIdentity != "" || peer.TrustClassification != events.Trusted {
+		t.Fatalf("wrong peer attribution: %+v %v", peer, err)
+	}
+	for _, addr := range []string{"203.0.113.5", "192.168.1.1"} {
+		session.SourceIP = netip.MustParseAddr(addr)
+		plain, err := a.event(context.Background(), session)
+		if err != nil || plain.PeerLogin != "" || plain.TailscaleDeviceID != "" || calls != 1 {
+			t.Fatalf("unexpected public/LAN attribution: %+v %v", plain, err)
+		}
+	}
+}

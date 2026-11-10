@@ -27,7 +27,7 @@ func TestCLIReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 	decoder := json.NewDecoder(&output)
-	for _, want := range []events.TrustClassification{events.Trusted, events.Unknown} {
+	for _, want := range []events.TrustClassification{events.Trusted, events.Unknown, events.External, events.Unknown} {
 		var event events.Event
 		if err := decoder.Decode(&event); err != nil {
 			t.Fatal(err)

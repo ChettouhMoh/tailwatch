@@ -40,7 +40,7 @@ func New(cfg *config.Config, logger *slog.Logger, output io.Writer, replay bool)
 
 func (a *App) event(ctx context.Context, session events.Session) (events.Event, error) {
 	var device *tailscale.Device
-	if session.SourceIP.IsValid() {
+	if session.SourceIP.IsValid() && (session.SSHServer != events.OpenSSH || monitor.IsTailnetAddress(session.SourceIP)) {
 		var err error
 		device, err = a.resolve(ctx, session.SourceIP)
 		if err != nil && ctx.Err() == nil {
@@ -52,9 +52,12 @@ func (a *App) event(ctx context.Context, session events.Session) (events.Event, 
 		return events.Event{}, err
 	}
 	event := events.Event{Session: session, EventType: "SSH_SESSION_STARTED", Decision: monitor.Classify(a.cfg, session, device)}
-	if device != nil && (device.LoginName == "" || device.LoginName == session.TailscaleUserIdentity) {
+	if device != nil && (session.SSHServer == events.OpenSSH || device.LoginName == "" || device.LoginName == session.TailscaleUserIdentity) {
 		event.DeviceHostname = device.Hostname
 		event.TailscaleDeviceID = device.ID
+		if session.SSHServer == events.OpenSSH && !device.Tagged {
+			event.PeerLogin = device.LoginName
+		}
 	}
 	return event, nil
 }
@@ -90,7 +93,7 @@ func (s *stream) handle(ctx context.Context, record source.Record) error {
 	session, err := record.Session()
 	if err != nil {
 		s.malformed++
-		s.app.logger.Warn("skipping malformed SSH start record", "error", err, "cursor", record.Cursor)
+		s.app.logger.Warn("skipping malformed SSH login record", "error", err, "cursor", record.Cursor)
 	}
 	if session == nil || slices.Contains(s.state.Recent, session.ID) {
 		// Limit writes for ordinary daemon chatter. Re-reading these entries is harmless.
@@ -145,7 +148,7 @@ func (a *App) Follow(ctx context.Context, statePath string, stderr io.Writer) er
 			return err
 		}
 	}
-	a.logger.Info("following Tailscale SSH journal", "state", statePath, "resuming", state.Cursor != "")
+	a.logger.Info("watching the journal for SSH logins", "state", statePath, "resuming", state.Cursor != "")
 	stream := stream{app: a, state: state, statePath: statePath, lastSave: time.Now()}
 	return source.Follow(ctx, state.Since, state.Cursor, stderr, func(r source.Record) error { return stream.handle(ctx, r) })
 }

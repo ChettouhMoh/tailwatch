@@ -19,7 +19,7 @@ func Classify(cfg *config.Config, session events.Session, device *tailscale.Devi
 	switch {
 	case !ip.IsValid():
 		return decision(events.Unknown, "Session was granted but the journal record contains no source IP")
-	case device != nil && device.LoginName != "" && device.LoginName != session.TailscaleUserIdentity:
+	case session.SSHServer != events.OpenSSH && device != nil && device.LoginName != "" && device.LoginName != session.TailscaleUserIdentity:
 		return decision(events.Unknown, "Current device identity differs from the user in the session log")
 	case slices.Contains(cfg.TrustedIPs, ip):
 		return decision(events.Trusted, "Source IP is allowlisted")
@@ -29,11 +29,16 @@ func Classify(cfg *config.Config, session events.Session, device *tailscale.Devi
 		return decision(events.Trusted, "Tailscale user is allowlisted")
 	case device != nil:
 		return decision(events.UnrecognizedTailnet, "Resolved device and user have no matching allowlist entry")
-	case tailnetIPv4.Contains(ip) || tailnetIPv6.Contains(ip):
+	case IsTailnetAddress(ip):
 		return decision(events.Unknown, "Could not resolve the tailnet address to a device")
 	default:
 		return decision(events.External, "Unresolved source is outside the Tailscale address ranges")
 	}
+}
+
+func IsTailnetAddress(ip netip.Addr) bool {
+	ip = ip.Unmap()
+	return tailnetIPv4.Contains(ip) || tailnetIPv6.Contains(ip)
 }
 
 func decision(class events.TrustClassification, reason string) events.Decision {

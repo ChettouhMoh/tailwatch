@@ -7,6 +7,12 @@ import (
 
 type Severity string
 type TrustClassification string
+type SSHServer string
+
+const (
+	TailscaleSSH SSHServer = "tailscale"
+	OpenSSH      SSHServer = "openssh"
+)
 
 const (
 	SeverityNormal   Severity = "NORMAL"
@@ -18,11 +24,13 @@ const (
 	Unknown             TrustClassification = "UNKNOWN"
 )
 
-// Session contains only fields observed at the time Tailscale authorized the SSH session.
+// Session contains the login as observed by the authenticating SSH server.
 type Session struct {
 	ID                    string     `json:"id"`
 	Timestamp             time.Time  `json:"timestamp"`
 	Server                string     `json:"server"`
+	SSHServer             SSHServer  `json:"ssh_server"`
+	AuthMethod            string     `json:"auth_method,omitempty"`
 	SourceIP              netip.Addr `json:"source_ip"`
 	SSHUsername           string     `json:"ssh_username"`
 	TailscaleUserIdentity string     `json:"tailscale_user_identity"`
@@ -40,4 +48,5 @@ type Event struct {
 	EventType         string `json:"event_type"`
 	DeviceHostname    string `json:"device_hostname,omitempty"`
 	TailscaleDeviceID string `json:"tailscale_device_id,omitempty"`
+	PeerLogin         string `json:"tailscale_peer_login,omitempty"`
 }

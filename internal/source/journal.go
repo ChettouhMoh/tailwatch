@@ -24,6 +24,7 @@ type Record struct {
 	Host    string          `json:"_HOSTNAME"`
 	Unit    string          `json:"_SYSTEMD_UNIT"`
 	Command string          `json:"_COMM"`
+	UID     string          `json:"_UID"`
 	Message json.RawMessage `json:"MESSAGE"`
 }
 
@@ -33,12 +34,7 @@ var (
 	grantDetails  = regexp.MustCompile(`^access granted to (.*?) as ssh-user (".*")$`)
 )
 
-// Both post-authentication messages identify the same session. A standalone grant
-// can still produce an alert when the more detailed start record is missing.
 func (r Record) Session() (*events.Session, error) {
-	if r.Unit != "tailscaled.service" || r.Command != "tailscaled" {
-		return nil, nil
-	}
 	var msg string
 	if len(r.Message) == 0 || r.Message[0] != '"' {
 		return nil, nil
@@ -46,6 +42,28 @@ func (r Record) Session() (*events.Session, error) {
 	if err := json.Unmarshal(r.Message, &msg); err != nil {
 		return nil, err
 	}
+	var session *events.Session
+	var err error
+	switch {
+	case r.Unit == "tailscaled.service" && r.Command == "tailscaled":
+		session, err = tailscaleSession(msg)
+	case r.UID == "0" && (r.Command == "sshd" || r.Command == "sshd-session" || r.Command == "sshd-auth"):
+		session, err = r.openSSHSession(msg)
+	}
+	if err != nil || session == nil {
+		return nil, err
+	}
+	micros, err := strconv.ParseInt(r.Micros, 10, 64)
+	if err != nil || micros <= 0 || r.Host == "" {
+		return nil, errors.New("missing journal host or valid timestamp")
+	}
+	session.Timestamp = time.UnixMicro(micros).UTC()
+	session.Server = r.Host
+	return session, nil
+}
+
+// The detailed start and adjacent access grant describe the same Tailscale session.
+func tailscaleSession(msg string) (*events.Session, error) {
 	msg = strings.TrimPrefix(msg, "ssh: ")
 	header := sessionPrefix.FindStringSubmatch(msg)
 	if header == nil {
@@ -78,14 +96,9 @@ func (r Record) Session() (*events.Session, error) {
 	if err != nil || user == "" {
 		return nil, errors.New("invalid SSH account in start message")
 	}
-	micros, err := strconv.ParseInt(r.Micros, 10, 64)
-	if err != nil || micros <= 0 || r.Host == "" {
-		return nil, errors.New("missing journal host or valid timestamp")
-	}
 	return &events.Session{
 		ID:                    header[1],
-		Timestamp:             time.UnixMicro(micros).UTC(),
-		Server:                r.Host,
+		SSHServer:             events.TailscaleSSH,
 		SourceIP:              ip,
 		SSHUsername:           user,
 		TailscaleUserIdentity: login,
@@ -122,7 +135,9 @@ func Follow(ctx context.Context, since int64, cursor string, stderr io.Writer, h
 	child, cancel := context.WithCancel(ctx)
 	defer cancel()
 	cmd := exec.CommandContext(child, "journalctl", "--follow", "--no-tail", "--no-pager", "--output=json",
-		"--output-fields=MESSAGE,_HOSTNAME,_SYSTEMD_UNIT,_COMM", start, "_SYSTEMD_UNIT=tailscaled.service", "_COMM=tailscaled")
+		"--output-fields=MESSAGE,_HOSTNAME,_SYSTEMD_UNIT,_COMM,_UID", start,
+		"_SYSTEMD_UNIT=tailscaled.service", "_COMM=tailscaled", "+",
+		"_UID=0", "_COMM=sshd", "_COMM=sshd-session", "_COMM=sshd-auth")
 	cmd.Stderr = stderr
 	out, err := cmd.StdoutPipe()
 	if err != nil {

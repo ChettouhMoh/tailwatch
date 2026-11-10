@@ -48,14 +48,14 @@ func TestLiveJournalResumeAndLock(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "stopped following") {
 		t.Fatalf("unexpected journal exit: %v; stderr: %s", err, journalErrors.String())
 	}
-	if strings.Count(output.String(), "\n") != 2 {
+	if strings.Count(output.String(), "\n") != 4 {
 		t.Fatalf("wrong output: %s", output.String())
 	}
 	args, err := os.ReadFile(os.Getenv("TAILWATCH_ARGS"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, arg := range []string{"--since=@", "--follow", "--no-tail", "_SYSTEMD_UNIT=tailscaled.service", "_COMM=tailscaled"} {
+	for _, arg := range []string{"--since=@", "--follow", "--no-tail", "_SYSTEMD_UNIT=tailscaled.service", "_COMM=tailscaled\n+\n_UID=0\n_COMM=sshd\n_COMM=sshd-session\n_COMM=sshd-auth"} {
 		if !strings.Contains(string(args), arg) {
 			t.Fatalf("missing %s in %s", arg, args)
 		}
@@ -66,7 +66,7 @@ func TestLiveJournalResumeAndLock(t *testing.T) {
 		t.Fatalf("unexpected stop: %v", err)
 	}
 	args, err = os.ReadFile(os.Getenv("TAILWATCH_ARGS"))
-	if err != nil || !strings.Contains(string(args), "--after-cursor=c4") {
+	if err != nil || !strings.Contains(string(args), "--after-cursor=c7") {
 		t.Fatalf("resume args=%s error=%v", args, err)
 	}
 }

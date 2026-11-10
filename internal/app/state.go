@@ -47,6 +47,10 @@ func loadCheckpoint(path string) (*checkpoint, error) {
 		(p.Event.Severity != events.SeverityNormal && p.Event.Severity != events.SeverityCritical)) {
 		return nil, errors.New("invalid undelivered event in checkpoint")
 	}
+	// Earlier checkpoints contained only Tailscale SSH sessions.
+	if state.Pending != nil && state.Pending.Event.SSHServer == "" {
+		state.Pending.Event.SSHServer = events.TailscaleSSH
+	}
 	return &state, nil
 }
 
