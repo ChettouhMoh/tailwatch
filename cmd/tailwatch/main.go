@@ -29,6 +29,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("tailwatch", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "config.json", "Path to the JSON configuration")
+	channelPath := flags.String("channel", "", "Path to the private notification channel configuration")
+	check := flags.Bool("check", false, "Validate settings and credential format, then exit")
 	state := flags.String("state", "tailwatch-state.json", "Path to the live journal checkpoint")
 	replay := flags.String("replay", "", "Read a journal JSON-lines file once and print events to stdout")
 	verbose := flags.Bool("verbose", false, "Enable debug logging on stderr")
@@ -38,7 +40,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if flags.NArg() != 0 {
 		return fmt.Errorf("unexpected argument %q", flags.Arg(0))
 	}
-	cfg, err := config.Load(*configPath)
+	if *check && *replay != "" {
+		return errors.New("-check and -replay must be used separately")
+	}
+	cfg, err := config.LoadWithChannel(*configPath, *channelPath)
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
@@ -53,6 +58,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
+	}
+	if *check {
+		fmt.Fprintf(stdout, "Configuration valid (%s).\n", cfg.Notification.Provider)
+		return nil
 	}
 	daemon := app.New(cfg, logger, notifier.NewOutput(stdout, remote).Send)
 	if *replay == "" {
