@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+if [ "$1" = remove ] && [ -d /run/systemd/system ] && ! [ -e /etc/systemd/system/tailwatch.service ]; then
+    deb-systemd-invoke stop tailwatch.service
+fi

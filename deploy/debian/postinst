@@ -1,0 +1,22 @@
+#!/bin/sh
+set -eu
+[ "$1" = configure ] || exit 0
+# An empty credential selects legacy settings until the first wizard run.
+# Append mode creates the file on first install and preserves it on upgrades.
+(umask 077 && : >> /etc/tailwatch/channel.json)
+chmod 0600 /etc/tailwatch/channel.json
+unit=tailwatch.service
+deb-systemd-helper unmask "$unit" >/dev/null
+if deb-systemd-helper --quiet was-enabled "$unit"; then
+    deb-systemd-helper enable "$unit" >/dev/null
+fi
+deb-systemd-helper update-state "$unit" >/dev/null
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    if [ -e "/etc/systemd/system/$unit" ] && ! [ "/etc/systemd/system/$unit" -ef "/usr/lib/systemd/system/$unit" ]; then
+        echo "Tailwatch found a local unit override. See the README about earlier manual installs."
+    else
+        deb-systemd-invoke restart "$unit"
+    fi
+fi
+echo "Run sudo tailwatch-setup to choose where to send SSH login alerts."

@@ -1,0 +1,127 @@
+#!/usr/bin/python3 -I
+"""Configure the installed Tailwatch service on Ubuntu."""
+
+import fcntl
+import getpass
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import warnings
+
+
+CONFIG_DIR = Path("/etc/tailwatch")
+CHANNEL = CONFIG_DIR / "channel.json"
+UNIT = "tailwatch.service"
+
+
+def field(label, previous=""):
+    while True:
+        suffix = f" [{previous}]" if previous else ""
+        value = input(f"{label}{suffix}: ").strip() or previous
+        if value:
+            return value
+        print("Enter a value.")
+
+
+def choose_channel(current):
+    providers = ("stdout", "telegram", "whatsapp", "webhook")
+    print("Choose where to send SSH login alerts. stdout writes to the local journal.")
+    while True:
+        provider = field("Channel (" + ", ".join(providers) + ")", current.get("provider") or "stdout").lower()
+        if provider in providers:
+            break
+        print("Choose one of the listed channels.")
+    result = {"provider": provider}
+    if provider == "stdout":
+        return result
+    if provider == "telegram":
+        chat = current.get("telegram") or {}
+        result["telegram"] = {"chat_id": field("Telegram chat ID or channel username", chat.get("chat_id"))}
+    elif provider == "whatsapp":
+        details = current.get("whatsapp") or {}
+        prompts = {
+            "phone_number_id": "Sender phone number ID",
+            "recipient": "Recipient (digits with country code)",
+            "api_version": "Graph API version (vN.N)",
+            "template": "Approved template name",
+            "language": "Template language",
+        }
+        result["whatsapp"] = {key: field(label, details.get(key)) for key, label in prompts.items()}
+    previous = current.get("credential") if provider == current.get("provider") else ""
+    label = {"telegram": "Bot token", "whatsapp": "Access token", "webhook": "HTTPS webhook URL"}[provider]
+    suffix = " (Enter to keep saved value)" if previous else ""
+    while True:
+        secret = getpass.getpass(f"{label}{suffix}: ") or previous
+        if secret:
+            result["credential"] = secret
+            return result
+        print("A credential is required for this channel.")
+
+
+def stage(data):
+    with tempfile.NamedTemporaryFile(dir=CONFIG_DIR, prefix=".channel-", delete=False) as f:
+        path = Path(f.name)
+        try:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+    return path
+
+
+def setup():
+    if os.geteuid() != 0:
+        sys.exit("Run sudo tailwatch-setup.")
+    if not sys.stdin.isatty():
+        sys.exit("Run tailwatch-setup in an interactive terminal (use ssh -t over SSH).")
+    with open(CONFIG_DIR / ".setup.lock", "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            sys.exit("Another Tailwatch setup is in progress.")
+        configure()
+
+
+def configure():
+    fragment = subprocess.check_output(["systemctl", "show", "--property=FragmentPath", "--value", UNIT],
+                                       text=True).strip()
+    if Path(fragment).resolve() != Path("/usr/lib/systemd/system", UNIT).resolve():
+        sys.exit("A different systemd unit is active. See 'Earlier manual installs' in /usr/share/doc/tailwatch/README.md.")
+    previous = CHANNEL.read_bytes() if CHANNEL.exists() else b""
+    base = json.loads((CONFIG_DIR / "config.json").read_bytes())
+    current = json.loads(previous) if previous else base.get("notification") or {}
+    data = json.dumps(choose_channel(current), indent=2).encode() + b"\n"
+    candidate = stage(data)
+    try:
+        subprocess.run(["/usr/bin/tailwatch", "-check", "-config", CONFIG_DIR / "config.json",
+                        "-channel", candidate], check=True)
+        os.replace(candidate, CHANNEL)
+    finally:
+        candidate.unlink(missing_ok=True)
+
+    try:
+        subprocess.run(["systemctl", "restart", UNIT], check=True)
+    except (OSError, subprocess.CalledProcessError, KeyboardInterrupt):
+        os.replace(stage(previous), CHANNEL)
+        print("Restored the previous settings. Restarting Tailwatch with them.", file=sys.stderr)
+        subprocess.run(["systemctl", "restart", UNIT], check=True)
+        raise
+    print("Tailwatch is running. Open a fresh SSH connection to verify delivery.")
+
+
+if __name__ == "__main__":
+    os.umask(0o077)
+    warnings.simplefilter("error", getpass.GetPassWarning)
+    try:
+        setup()
+    except (EOFError, KeyboardInterrupt):
+        sys.exit("\nSetup cancelled.")
+    except getpass.GetPassWarning:
+        sys.exit("Unable to hide credential input on this terminal.")
+    except (OSError, ValueError, subprocess.CalledProcessError) as err:
+        sys.exit(f"Setup failed: {err}")

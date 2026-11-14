@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+if [ "$1" = remove ]; then
+    deb-systemd-helper mask tailwatch.service >/dev/null
+fi
+if [ "$1" = purge ]; then
+    deb-systemd-helper purge tailwatch.service >/dev/null
+    deb-systemd-helper unmask tailwatch.service >/dev/null
+    rm -f /etc/tailwatch/channel.json /etc/tailwatch/.setup.lock
+    rmdir --ignore-fail-on-non-empty /etc/tailwatch 2>/dev/null || true
+fi
+if [ "$1" = remove ] || [ "$1" = purge ]; then
+    if [ -d /run/systemd/system ]; then systemctl daemon-reload; fi
+fi

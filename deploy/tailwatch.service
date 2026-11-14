@@ -3,7 +3,10 @@ Description=Tailwatch SSH login monitor
 After=systemd-journald.service
 
 [Service]
-ExecStart=/usr/local/bin/tailwatch -config /etc/tailwatch/config.json -state /var/lib/tailwatch/journal.json
+Type=exec
+LoadCredential=tailwatch-channel:/etc/tailwatch/channel.json
+ExecStartPre=/usr/bin/tailwatch -check -config /etc/tailwatch/config.json -channel %d/tailwatch-channel
+ExecStart=/usr/bin/tailwatch -config /etc/tailwatch/config.json -channel %d/tailwatch-channel -state /var/lib/tailwatch/journal.json
 DynamicUser=yes
 SupplementaryGroups=systemd-journal
 StateDirectory=tailwatch
