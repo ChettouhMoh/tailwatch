@@ -42,9 +42,9 @@ func Remote(cfg config.NotificationConfig) (Sender, error) {
 	case "webhook":
 		return webhook{url: cfg.WebhookURL, client: newHTTPClient()}, nil
 	case "telegram":
-		return newTelegram(cfg.Telegram.ChatID)
+		return newTelegram(cfg.Telegram.ChatID, cfg.Credential("TAILWATCH_TELEGRAM_BOT_TOKEN"))
 	case "whatsapp":
-		return newWhatsApp(cfg.WhatsApp)
+		return newWhatsApp(cfg.WhatsApp, cfg.Credential("TAILWATCH_WHATSAPP_ACCESS_TOKEN"))
 	default:
 		return nil, fmt.Errorf("unknown notification provider %q", cfg.Provider)
 	}

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,7 +25,16 @@ type NotificationConfig struct {
 	Telegram   struct {
 		ChatID string `json:"chat_id"`
 	} `json:"telegram"`
-	WhatsApp WhatsAppConfig `json:"whatsapp"`
+	WhatsApp   WhatsAppConfig `json:"whatsapp"`
+	credential *string
+}
+
+// A managed channel supplies its own credential. Legacy setups use the environment.
+func (n NotificationConfig) Credential(envName string) string {
+	if n.credential != nil {
+		return *n.credential
+	}
+	return os.Getenv(envName)
 }
 
 type WhatsAppConfig struct {
@@ -54,28 +64,64 @@ type Config struct {
 }
 
 func Load(path string) (*Config, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
+	return LoadWithChannel(path, "")
+}
 
-	var cfg *Config
-	decoder := json.NewDecoder(file)
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&cfg); err != nil {
-		return nil, fmt.Errorf("decode config: %w", err)
+// LoadWithChannel applies the optional systemd credential before validating the
+// effective configuration. A fresh package supplies an empty file for legacy installs.
+func LoadWithChannel(path, channelPath string) (*Config, error) {
+	var cfg Config
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
 	}
-	if cfg == nil || decoder.Decode(new(json.RawMessage)) != io.EOF {
-		return nil, errors.New("config must contain one JSON object")
+	if err := decodeObject(data, &cfg); err != nil {
+		return nil, fmt.Errorf("decode config: %w", err)
 	}
 	if override := os.Getenv("TAILWATCH_WEBHOOK_URL"); override != "" {
 		cfg.Notification.WebhookURL = override
 	}
+	var channel struct {
+		NotificationConfig
+		Secret string `json:"credential"`
+	}
+	if channelPath != "" {
+		// An empty credential leaves the legacy settings active.
+		data, err := os.ReadFile(channelPath)
+		if err != nil {
+			return nil, fmt.Errorf("read channel: %w", err)
+		}
+		if len(data) > 0 {
+			if err := decodeObject(data, &channel); err != nil || channel.Provider == "" {
+				return nil, errors.New("invalid channel configuration: expected a JSON object with a provider")
+			}
+			cfg.Notification = channel.NotificationConfig
+			cfg.Notification.credential = &channel.Secret
+			if channel.Provider == "webhook" {
+				cfg.Notification.WebhookURL = channel.Secret
+			}
+		}
+	}
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	return cfg, nil
+	return &cfg, nil
+}
+
+func decodeObject(data []byte, dest any) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return errors.New("expected one JSON object")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dest); err != nil {
+		return err
+	}
+	if decoder.Decode(new(json.RawMessage)) != io.EOF {
+		return errors.New("expected one JSON object")
+	}
+	return nil
 }
 
 func (c *Config) Validate() error {

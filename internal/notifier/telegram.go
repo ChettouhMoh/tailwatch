@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"os"
 	"regexp"
 
 	"tailwatch/internal/events"
@@ -18,10 +17,9 @@ type telegram struct {
 
 var botToken = regexp.MustCompile(`^[0-9]+:[A-Za-z0-9_-]+$`)
 
-func newTelegram(chatID string) (*telegram, error) {
-	token := os.Getenv("TAILWATCH_TELEGRAM_BOT_TOKEN")
+func newTelegram(chatID, token string) (*telegram, error) {
 	if !botToken.MatchString(token) {
-		return nil, errors.New("telegram requires a valid TAILWATCH_TELEGRAM_BOT_TOKEN")
+		return nil, errors.New("telegram requires a valid bot token")
 	}
 	return &telegram{
 		endpoint: "https://api.telegram.org/bot" + token + "/sendMessage",

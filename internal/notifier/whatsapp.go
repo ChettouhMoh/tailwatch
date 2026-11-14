@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"os"
 	"strings"
 	"unicode"
 
@@ -18,10 +17,9 @@ type whatsApp struct {
 	client *http.Client
 }
 
-func newWhatsApp(cfg config.WhatsAppConfig) (*whatsApp, error) {
-	token := os.Getenv("TAILWATCH_WHATSAPP_ACCESS_TOKEN")
+func newWhatsApp(cfg config.WhatsAppConfig, token string) (*whatsApp, error) {
 	if token == "" || strings.IndexFunc(token, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) != -1 {
-		return nil, errors.New("whatsapp requires a valid TAILWATCH_WHATSAPP_ACCESS_TOKEN")
+		return nil, errors.New("whatsapp requires a valid access token")
 	}
 	return &whatsApp{config: cfg, token: token, client: newHTTPClient()}, nil
 }
